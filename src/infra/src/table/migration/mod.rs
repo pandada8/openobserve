@@ -202,13 +202,13 @@ mod m20260921_000001_add_input_preview_to_llm_annotation_queue_items;
 mod m20260922_000001_add_password_policy_columns_to_users;
 mod m20260922_000002_create_user_password_history_table;
 mod m20260922_000003_create_user_auth_state_table;
+mod m20260923_000001_create_ai_chat_sessions;
 mod m20260923_000001_create_llm_prompts;
 mod m20260924_000001_add_recovery_episode_columns;
 mod m20260928_000001_add_alert_recovery_destinations;
 mod m20261001_000001_add_anomaly_band_settings;
 mod m20261003_000001_create_rum_pa_tables;
 mod m20261004_000001_create_query_history;
-mod m20260923_000001_create_ai_chat_sessions;
 /// Shared body of the two `folder_id` migrations above; not a migration itself.
 mod workflow_folder_id;
 
