@@ -84,7 +84,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
         #[cfg(feature = "enterprise")]
         let is_draining = o2_enterprise::enterprise::drain::is_draining();
         #[cfg(not(feature = "enterprise"))]
-        let is_draining = false;
+        let is_draining = config::drain::is_draining();
 
         if !is_draining {
             // Normal operation: sleep between snapshots
@@ -97,6 +97,10 @@ pub async fn run() -> Result<(), anyhow::Error> {
             .await;
         } else {
             log::info!("[INGESTER:PACK:JOB] Draining mode active, processing segments immediately");
+        }
+
+        if config::drain::is_draining() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
         // check if db is available, skip this iteration to avoid generating

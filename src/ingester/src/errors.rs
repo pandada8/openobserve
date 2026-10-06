@@ -22,6 +22,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Ingester is draining; retry on another node"))]
+    Draining,
     WalError {
         source: wal::Error,
     },

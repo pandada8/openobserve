@@ -72,16 +72,17 @@ pub fn apply_common_middlewares(app: axum::Router) -> axum::Router {
         "HTTP client IP sources (in order, implicit ConnectInfo fallback): {}",
         cfg.http.real_ip_source
     );
-    app.layer(config::axum::middlewares::AccessLogLayer::new(
-        config::axum::middlewares::get_http_access_log_format(),
-    ))
-    .layer(config::axum::middlewares::SlowLogLayer::new(
-        cfg.limit.http_slow_log_threshold,
-    ))
-    .layer(axum::middleware::from_fn(
-        config::axum::middlewares::extract_real_ip,
-    ))
-    .layer(axum::Extension(ip_sources))
+    app.layer(axum::middleware::from_fn(drain_admission))
+        .layer(config::axum::middlewares::AccessLogLayer::new(
+            config::axum::middlewares::get_http_access_log_format(),
+        ))
+        .layer(config::axum::middlewares::SlowLogLayer::new(
+            cfg.limit.http_slow_log_threshold,
+        ))
+        .layer(axum::middleware::from_fn(
+            config::axum::middlewares::extract_real_ip,
+        ))
+        .layer(axum::Extension(ip_sources))
 }
 
 /// Serve a router with the configured TLS and bounded graceful shutdown.
@@ -119,6 +120,36 @@ pub async fn serve(haddr: SocketAddr, app: axum::Router) -> Result<(), anyhow::E
     Ok(())
 }
 
+async fn drain_admission(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let cfg = config::get_config();
+    let path = request
+        .uri()
+        .path()
+        .strip_prefix(&cfg.common.base_uri)
+        .unwrap_or(request.uri().path());
+    let is_control = path.starts_with("/node/")
+        || matches!(path, "/healthz" | "/readyz" | "/schedulez" | "/metrics");
+    let _guard = if config::cluster::LOCAL_NODE.is_ingester() && !is_control {
+        match config::drain::admit(false) {
+            Some(guard) => Some(guard),
+            None => {
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Ingester draining",
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+    next.run(request).await
+}
+
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -152,6 +183,15 @@ async fn shutdown_signal() {
         }
     }
 
+    if config::cluster::LOCAL_NODE.is_ingester() {
+        config::drain::begin();
+        if let Err(e) = common::infra::cluster::set_unschedulable().await {
+            log::error!("Failed to remove draining node from routing: {e}");
+        }
+        if let Err(e) = ingester::drain::run().await {
+            log::error!("Shutdown with unflushed data; retain PVC: {e}");
+        }
+    }
     if let Err(e) = common::infra::cluster::set_offline().await {
         log::error!("set offline failed: {e}");
     }

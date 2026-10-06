@@ -1,0 +1,191 @@
+use crate::compiler::prelude::*;
+use csv::ReaderBuilder;
+use std::sync::LazyLock;
+
+static DEFAULT_DELIMITER: LazyLock<Value> = LazyLock::new(|| Value::Bytes(Bytes::from(",")));
+
+static PARAMETERS: LazyLock<Vec<Parameter>> = LazyLock::new(|| {
+    vec![
+        Parameter::required("value", kind::BYTES, "The string to parse."),
+        Parameter::optional(
+            "delimiter",
+            kind::BYTES,
+            "The field delimiter to use when parsing. Must be a single-byte utf8 character.",
+        )
+        .default(&DEFAULT_DELIMITER),
+    ]
+});
+
+fn parse_csv(csv_string: Value, delimiter: Value) -> Resolved {
+    let csv_string = csv_string.try_bytes()?;
+    let delimiter = delimiter.try_bytes()?;
+    if delimiter.len() != 1 {
+        return Err("delimiter must be a single character".into());
+    }
+    let delimiter = delimiter[0];
+    let reader = ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(delimiter)
+        .from_reader(&*csv_string);
+    reader
+        .into_byte_records()
+        .next()
+        .transpose()
+        .map_err(|err| format!("invalid csv record: {err}").into()) // shouldn't really happen
+        .map(|record| {
+            record
+                .map(|record| {
+                    record
+                        .iter()
+                        .map(|x| Bytes::copy_from_slice(x).into())
+                        .collect::<Vec<Value>>()
+                })
+                .unwrap_or_default()
+                .into()
+        })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParseCsv;
+
+impl Function for ParseCsv {
+    fn identifier(&self) -> &'static str {
+        "parse_csv"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Parses a single CSV formatted row. Only the first row is parsed in case of multiline input value."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Parse.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &[
+            "The delimiter must be a single-byte UTF-8 character.",
+            "`value` is not a valid CSV string.",
+        ]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::ARRAY
+    }
+
+    fn notices(&self) -> &'static [&'static str] {
+        &[indoc! {"
+            All values are returned as strings. We recommend manually coercing values to desired
+            types as you see fit.
+        "}]
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Parse a single CSV formatted row",
+                source: r#"parse_csv!(s'foo,bar,"foo "", bar"')"#,
+                result: Ok(r#"["foo", "bar", "foo \", bar"]"#),
+            },
+            example! {
+                title: "Parse a single CSV formatted row with custom delimiter",
+                source: r#"parse_csv!("foo bar", delimiter: " ")"#,
+                result: Ok(r#"["foo", "bar"]"#),
+            },
+        ]
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let delimiter = arguments.optional("delimiter");
+        Ok(ParseCsvFn { value, delimiter }.as_expr())
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        PARAMETERS.as_slice()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParseCsvFn {
+    value: Box<dyn Expression>,
+    delimiter: Option<Box<dyn Expression>>,
+}
+
+impl FunctionExpression for ParseCsvFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let csv_string = self.value.resolve(ctx)?;
+        let delimiter = self
+            .delimiter
+            .map_resolve_with_default(ctx, || DEFAULT_DELIMITER.clone())?;
+
+        parse_csv(csv_string, delimiter)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::array(inner_kind()).fallible()
+    }
+}
+
+#[inline]
+fn inner_kind() -> Collection<Index> {
+    let mut v = Collection::any();
+    v.set_unknown(Kind::bytes());
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+
+    test_function![
+        parse_csv => ParseCsv;
+
+        valid {
+            args: func_args![value: value!("foo,bar,\"foo \"\", bar\"")],
+            want: Ok(value!(["foo", "bar", "foo \", bar"])),
+            tdef: TypeDef::array(inner_kind()).fallible(),
+        }
+
+        invalid_utf8 {
+            args: func_args![value: value!(Bytes::copy_from_slice(&b"foo,b\xFFar"[..]))],
+            want: Ok(value!(vec!["foo".into(), value!(Bytes::copy_from_slice(&b"b\xFFar"[..]))])),
+            tdef: TypeDef::array(inner_kind()).fallible(),
+        }
+
+        custom_delimiter {
+            args: func_args![value: value!("foo bar"), delimiter: value!(" ")],
+            want: Ok(value!(["foo", "bar"])),
+            tdef: TypeDef::array(inner_kind()).fallible(),
+        }
+
+        invalid_delimiter {
+            args: func_args![value: value!("foo bar"), delimiter: value!(",,")],
+            want: Err("delimiter must be a single character"),
+            tdef: TypeDef::array(inner_kind()).fallible(),
+        }
+
+        single_value {
+            args: func_args![value: value!("foo")],
+            want: Ok(value!(["foo"])),
+            tdef: TypeDef::array(inner_kind()).fallible(),
+        }
+
+        empty_string {
+            args: func_args![value: value!("")],
+            want: Ok(value!([])),
+            tdef: TypeDef::array(inner_kind()).fallible(),
+        }
+
+        multiple_lines {
+            args: func_args![value: value!("first,line\nsecond,line,with,more,fields")],
+            want: Ok(value!(["first", "line"])),
+            tdef: TypeDef::array(inner_kind()).fallible(),
+        }
+    ];
+}

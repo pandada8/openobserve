@@ -28,6 +28,8 @@ impl LogsService for LogsServer {
         &self,
         request: tonic::Request<ExportLogsServiceRequest>,
     ) -> Result<tonic::Response<ExportLogsServiceResponse>, tonic::Status> {
+        let _admission = config::drain::admit(false)
+            .ok_or_else(|| tonic::Status::unavailable("Ingester is draining"))?;
         let start = std::time::Instant::now();
         let cfg = config::get_config();
 

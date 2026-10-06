@@ -1,0 +1,111 @@
+use crate::compiler::prelude::*;
+use crate::value;
+
+#[derive(Clone, Copy, Debug)]
+pub struct IsFloat;
+
+impl Function for IsFloat {
+    fn identifier(&self) -> &'static str {
+        "is_float"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Check if the `value`'s type is a float."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Type.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BOOLEAN
+    }
+
+    fn return_rules(&self) -> &'static [&'static str] {
+        &[
+            "Returns `true` if `value` is a float.",
+            "Returns `false` if `value` is anything else.",
+        ]
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::ANY,
+            "The value to check if it is a float.",
+        )];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Valid float",
+                source: "is_float(0.577)",
+                result: Ok("true"),
+            },
+            example! {
+                title: "Non-matching type",
+                source: r#"is_float("a string")"#,
+                result: Ok("false"),
+            },
+            example! {
+                title: "Boolean",
+                source: "is_float(true)",
+                result: Ok("false"),
+            },
+            example! {
+                title: "Null",
+                source: "is_float(null)",
+                result: Ok("false"),
+            },
+        ]
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+
+        Ok(IsFloatFn { value }.as_expr())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct IsFloatFn {
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for IsFloatFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        self.value.resolve(ctx).map(|v| value!(v.is_float()))
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::boolean().infallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    test_function![
+        is_float => IsFloat;
+
+        bytes {
+            args: func_args![value: value!("foobar")],
+            want: Ok(value!(false)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        float {
+            args: func_args![value: value!(0.577)],
+            want: Ok(value!(true)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+    ];
+}

@@ -1,0 +1,203 @@
+use super::util::ConstOrExpr;
+use crate::compiler::prelude::*;
+
+fn zip2(value0: Value, value1: Value) -> Resolved {
+    Ok(value0
+        .try_array()?
+        .into_iter()
+        .zip(value1.try_array()?)
+        .map(|(v0, v1)| Value::Array(vec![v0, v1]))
+        .collect())
+}
+
+fn zip_all(value: Value) -> Resolved {
+    Ok(MultiZip(
+        value
+            .try_array()?
+            .into_iter()
+            .map(|value| value.try_array().map(Vec::into_iter))
+            .collect::<Result<_, _>>()?,
+    )
+    .collect::<Vec<_>>()
+    .into())
+}
+
+struct MultiZip(Vec<std::vec::IntoIter<Value>>);
+
+impl Iterator for MultiZip {
+    type Item = Vec<Value>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.iter_mut().map(Iterator::next).collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Zip;
+
+impl Function for Zip {
+    fn identifier(&self) -> &'static str {
+        "zip"
+    }
+
+    fn usage(&self) -> &'static str {
+        indoc! {"
+            Iterate over several arrays in parallel, producing a new array containing arrays of items from each source.
+            The resulting array will be as long as the shortest input array, with all the remaining elements dropped.
+            This function is modeled from the `zip` function [in Python](https://docs.python.org/3/library/functions.html#zip),
+            but similar methods can be found in [Ruby](https://docs.ruby-lang.org/en/master/Array.html#method-i-zip)
+            and [Rust](https://doc.rust-lang.org/stable/std/iter/trait.Iterator.html#method.zip).
+
+            If a single parameter is given, it must contain an array of all the input arrays.
+        "}
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Array.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &["`array_0` and `array_1` must be arrays."]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::ARRAY
+    }
+
+    fn return_rules(&self) -> &'static [&'static str] {
+        &[
+            "`zip` is considered fallible if any of the parameters is not an array, or if only the first parameter is present and it is not an array of arrays.",
+        ]
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[
+            Parameter::required(
+                "array_0",
+                kind::ARRAY,
+                "The first array of elements, or the array of input arrays if no other parameter is present.",
+            ),
+            Parameter::optional(
+                "array_1",
+                kind::ARRAY,
+                "The second array of elements. If not present, the first parameter contains all the arrays.",
+            ),
+        ];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Merge two arrays",
+                source: "zip([1, 2, 3], [4, 5, 6, 7])",
+                result: Ok("[[1, 4], [2, 5], [3, 6]]"),
+            },
+            example! {
+                title: "Merge three arrays",
+                source: r"zip([[1, 2], [3, 4], [5, 6]])",
+                result: Ok(r"[[1, 3, 5], [2, 4, 6]]"),
+            },
+            example! {
+                title: "Merge an array of three arrays into an array of 3-tuples",
+                source: r#"zip([["a", "b", "c"], [1, null, true], [4, 5, 6]])"#,
+                result: Ok(r#"[["a", 1, 4], ["b", null, 5], ["c", true, 6]]"#),
+            },
+            example! {
+                title: "Merge two array parameters",
+                source: "zip([1, 2, 3, 4], [5, 6, 7])",
+                result: Ok("[[1, 5], [2, 6], [3, 7]]"),
+            },
+        ]
+    }
+
+    fn compile(
+        &self,
+        state: &TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let array_0 = ConstOrExpr::new(arguments.required("array_0"), state);
+        let array_1 = ConstOrExpr::optional(arguments.optional("array_1"), state);
+
+        Ok(ZipFn { array_0, array_1 }.as_expr())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ZipFn {
+    array_0: ConstOrExpr,
+    array_1: Option<ConstOrExpr>,
+}
+
+impl FunctionExpression for ZipFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let array_0 = self.array_0.resolve(ctx)?;
+        match &self.array_1 {
+            None => zip_all(array_0),
+            Some(array_1) => zip2(array_0, array_1.resolve(ctx)?),
+        }
+    }
+
+    fn type_def(&self, _state: &TypeState) -> TypeDef {
+        TypeDef::array(Collection::any())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::value;
+
+    use super::*;
+
+    test_function![
+        zip => Zip;
+
+        zips_two_arrays {
+            args: func_args![array_0: value!([[1, 2, 3], [4, 5, 6]])],
+            want: Ok(value!([[1, 4], [2, 5], [3, 6]])),
+            tdef: TypeDef::array(Collection::any()),
+        }
+
+        zips_three_arrays {
+            args: func_args![array_0: value!([[1, 2, 3], [4, 5, 6], [7, 8, 9]])],
+            want: Ok(value!([[1, 4, 7], [2, 5, 8], [3, 6, 9]])),
+            tdef: TypeDef::array(Collection::any()),
+        }
+
+        zips_two_parameters {
+            args: func_args![array_0: value!([1, 2, 3]), array_1: value!([4, 5, 6])],
+            want: Ok(value!([[1, 4], [2, 5], [3, 6]])),
+            tdef: TypeDef::array(Collection::any()),
+        }
+
+        uses_shortest_length1 {
+            args: func_args![array_0: value!([[1, 2, 3], [4, 5]])],
+            want: Ok(value!([[1, 4], [2, 5]])),
+            tdef: TypeDef::array(Collection::any()),
+        }
+
+        uses_shortest_length2 {
+            args: func_args![array_0: value!([[1, 2], [4, 5, 6]])],
+            want: Ok(value!([[1, 4], [2, 5]])),
+            tdef: TypeDef::array(Collection::any()),
+        }
+
+        requires_outer_array {
+            args: func_args![array_0: 1],
+            want: Err("expected array, got integer"),
+            tdef: TypeDef::array(Collection::any()),
+        }
+
+        requires_inner_arrays1 {
+            args: func_args![array_0: value!([true, []])],
+            want: Err("expected array, got boolean"),
+            tdef: TypeDef::array(Collection::any()),
+        }
+
+        requires_inner_arrays2 {
+            args: func_args![array_0: value!([[], null])],
+            want: Err("expected array, got null"),
+            tdef: TypeDef::array(Collection::any()),
+        }
+    ];
+}

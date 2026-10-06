@@ -37,6 +37,8 @@ impl Ingest for Ingester {
         &self,
         request: Request<IngestionRequest>,
     ) -> Result<Response<IngestionResponse>, Status> {
+        let _admission = config::drain::admit(false)
+            .ok_or_else(|| tonic::Status::unavailable("Ingester is draining"))?;
         let start = std::time::Instant::now();
         let req = request.into_inner();
         let org_id = req.org_id;

@@ -1,0 +1,164 @@
+use crate::compiler::prelude::*;
+use std::path::Path;
+
+fn basename(value: &Value) -> Resolved {
+    let path_str_cow = value.try_bytes_utf8_lossy()?;
+    let path_str = path_str_cow.as_ref();
+    let path = Path::new(path_str);
+
+    let basename = path.file_name().and_then(|s| s.to_str()).map(Value::from);
+    Ok(basename.into())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BaseName;
+
+impl Function for BaseName {
+    fn identifier(&self) -> &'static str {
+        "basename"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Returns the filename component of the given `path`. This is similar to the Unix `basename` command. If the path ends in a directory separator, the function returns the name of the directory."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::String.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &["`value` is not a valid string."]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES | kind::NULL
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::BYTES,
+            "The path from which to extract the basename.",
+        )];
+        PARAMETERS
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+
+        Ok(BaseNameFn { value }.as_expr())
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Extract basename from file path",
+                source: r#"basename!("/usr/local/bin/vrl")"#,
+                result: Ok("\"vrl\""),
+            },
+            example! {
+                title: "Extract basename from file path with extension",
+                source: r#"basename!("/home/user/file.txt")"#,
+                result: Ok("\"file.txt\""),
+            },
+            example! {
+                title: "Extract basename from directory path",
+                source: r#"basename!("/home/user/")"#,
+                result: Ok("\"user\""),
+            },
+            example! {
+                title: "Root directory has no basename",
+                source: r#"basename!("/")"#,
+                result: Ok("null"),
+            },
+        ]
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BaseNameFn {
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for BaseNameFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+        basename(&value)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::bytes().or_null().fallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tdef() -> TypeDef {
+        BaseNameFn { value: expr!("") }.type_def(&state::TypeState::default())
+    }
+
+    test_function![
+        basename => BaseName;
+
+        home_user_trailing_slash {
+            args: func_args![value: "/home/user/"],
+            want: Ok("user"),
+            tdef: tdef(),
+        }
+
+        home_user_no_trailing_slash {
+            args: func_args![value: "/home/user"],
+            want: Ok("user"),
+            tdef: tdef(),
+        }
+
+        root {
+            args: func_args![value: "/"],
+            want: Ok(Value::Null),
+            tdef: tdef(),
+        }
+
+        current_dir {
+            args: func_args![value: "."],
+            want: Ok(Value::Null),
+            tdef: tdef(),
+        }
+
+        parent_dir {
+            args: func_args![value: ".."],
+            want: Ok(Value::Null),
+            tdef: tdef(),
+        }
+
+        file_in_current_dir {
+            args: func_args![value: "file"],
+            want: Ok("file"),
+            tdef: tdef(),
+        }
+
+        hidden_file {
+            args: func_args![value: ".file"],
+            want: Ok(".file"),
+            tdef: tdef(),
+        }
+
+        double_extension {
+            args: func_args![value: "file.tar.gz"],
+            want: Ok("file.tar.gz"),
+            tdef: tdef(),
+        }
+
+        path_with_extension {
+            args: func_args![value: "/home/user/file.txt"],
+            want: Ok("file.txt"),
+            tdef: tdef(),
+        }
+    ];
+}

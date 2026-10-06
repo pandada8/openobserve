@@ -1,0 +1,140 @@
+use crate::compiler::prelude::*;
+
+fn push(list: Value, item: Value) -> Resolved {
+    let mut list = list.try_array()?;
+    list.push(item);
+    Ok(list.into())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Push;
+
+impl Function for Push {
+    fn identifier(&self) -> &'static str {
+        "push"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Adds the `item` to the end of the `value` array."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Array.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::ARRAY
+    }
+
+    fn return_rules(&self) -> &'static [&'static str] {
+        &["Returns a new array. The `value` is _not_ modified in place."]
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[
+            Parameter::required("value", kind::ARRAY, "The target array."),
+            Parameter::required("item", kind::ANY, "The item to push."),
+        ];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Push an item onto an array",
+                source: r"push([1, 2], 3)",
+                result: Ok(r"[1, 2, 3]"),
+            },
+            example! {
+                title: "Empty array",
+                source: r#"push([], "bar")"#,
+                result: Ok(r#"["bar"]"#),
+            },
+        ]
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let item = arguments.required("item");
+
+        Ok(PushFn { value, item }.as_expr())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PushFn {
+    value: Box<dyn Expression>,
+    item: Box<dyn Expression>,
+}
+
+impl FunctionExpression for PushFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let list = self.value.resolve(ctx)?;
+        let item = self.item.resolve(ctx)?;
+
+        push(list, item)
+    }
+
+    fn type_def(&self, state: &state::TypeState) -> TypeDef {
+        let item = self.item.type_def(state).kind().clone().upgrade_undefined();
+        let mut typedef = self.value.type_def(state).restrict_array();
+
+        let array = typedef.as_array_mut().expect("must be an array");
+
+        if let Some(exact_len) = array.exact_length() {
+            // The exact array length is known, so just add the item to the correct index.
+            array.known_mut().insert(exact_len.into(), item);
+        } else {
+            // We don't know where the item will be inserted, so just add it to the unknown.
+            array.set_unknown(array.unknown_kind().union(item));
+        }
+
+        typedef.infallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::btreemap;
+    use crate::value;
+
+    test_function![
+        push => Push;
+
+        empty_array {
+            args: func_args![value: value!([]), item: value!("foo")],
+            want: Ok(value!(["foo"])),
+            tdef: TypeDef::array(btreemap! {
+                Index::from(0) => Kind::bytes(),
+            }),
+        }
+
+        new_item {
+            args: func_args![value: value!([11, false, 42.5]), item: value!("foo")],
+            want: Ok(value!([11, false, 42.5, "foo"])),
+            tdef: TypeDef::array(btreemap! {
+                Index::from(0) => Kind::integer(),
+                Index::from(1) => Kind::boolean(),
+                Index::from(2) => Kind::float(),
+                Index::from(3) => Kind::bytes(),
+            }),
+        }
+
+        already_exists_item {
+            args: func_args![value: value!([11, false, 42.5]), item: value!(42.5)],
+            want: Ok(value!([11, false, 42.5, 42.5])),
+            tdef: TypeDef::array(btreemap! {
+                Index::from(0) => Kind::integer(),
+                Index::from(1) => Kind::boolean(),
+                Index::from(2) => Kind::float(),
+                Index::from(3) => Kind::float(),
+            }),
+        }
+    ];
+}

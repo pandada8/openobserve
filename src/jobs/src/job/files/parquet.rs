@@ -121,7 +121,11 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(
-                get_config().limit.file_push_interval,
+                if config::drain::is_draining() {
+                    1
+                } else {
+                    get_config().limit.file_push_interval
+                },
             ))
             .await;
         } else {
@@ -135,7 +139,11 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(
-                get_config().limit.file_push_interval,
+                if config::drain::is_draining() {
+                    1
+                } else {
+                    get_config().limit.file_push_interval
+                },
             ))
             .await;
         }
@@ -474,11 +482,12 @@ async fn move_files(
         .iter()
         .map(|f| f.meta.original_size)
         .sum::<i64>();
-    if total_original_size
-        < std::cmp::min(
-            cfg.limit.max_file_size_on_disk as i64,
-            cfg.compact.max_file_size as i64,
-        )
+    if !config::drain::is_draining()
+        && total_original_size
+            < std::cmp::min(
+                cfg.limit.max_file_size_on_disk as i64,
+                cfg.compact.max_file_size as i64,
+            )
         && (cfg.limit.file_move_fields_limit == 0
             || stream_fields_num < cfg.limit.file_move_fields_limit)
     {

@@ -1,0 +1,83 @@
+use crate::compiler::prelude::{TypeDef as VrlTypeDef, *};
+
+fn type_def(type_def: &VrlTypeDef) -> Value {
+    let mut tree = type_def.kind().canonicalize().debug_info();
+
+    if type_def.is_fallible() {
+        tree.insert("fallible".to_owned().into(), true.into());
+    }
+
+    tree.into()
+}
+
+/// A debug function to print the type definition of an expression at runtime.
+///
+/// This function is *UNDOCUMENTED* and *UNSTABLE*. It is *NOT* to be advertised
+/// to users of Vector, even though it is technically usable by others.
+#[derive(Clone, Copy, Debug)]
+pub struct TypeDef;
+
+impl Function for TypeDef {
+    fn identifier(&self) -> &'static str {
+        "type_def"
+    }
+
+    fn usage(&self) -> &'static str {
+        indoc! {"
+            Returns the type definition of an expression at runtime.
+
+            This is a debug function that is *UNSTABLE*. Behavior is *NOT* guaranteed even though it is technically usable.
+        "}
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Type.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::ANY
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::ANY,
+            "The expression to get the type definition for.",
+        )];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[example! {
+            title: "return type definition",
+            source: "type_def(42)",
+            result: Ok(r#"{ "integer": true }"#),
+        }]
+    }
+
+    fn compile(
+        &self,
+        state: &TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let type_def = value.type_def(state);
+        Ok(TypeDefFn { type_def }.as_expr())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TypeDefFn {
+    type_def: VrlTypeDef,
+}
+
+impl FunctionExpression for TypeDefFn {
+    fn resolve(&self, _ctx: &mut Context) -> Resolved {
+        Ok(type_def(&self.type_def.clone()))
+    }
+
+    fn type_def(&self, _state: &state::TypeState) -> VrlTypeDef {
+        VrlTypeDef::any()
+    }
+}

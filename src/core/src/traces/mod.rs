@@ -164,6 +164,19 @@ struct CanonicalAgentFields {
 }
 
 fn normalize_llm_field_types(record_val: &mut Map<String, json::Value>) {
+    normalize_llm_field_types_when_enabled(
+        record_val,
+        config::get_config().common.genai_processing_enabled,
+    );
+}
+
+fn normalize_llm_field_types_when_enabled(
+    record_val: &mut Map<String, json::Value>,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
     for &field in GEN_AI_INT64_FIELDS.iter() {
         if let Some(value) = record_val.get_mut(field)
             && value.as_i64().is_none()
@@ -476,7 +489,9 @@ pub async fn handle_otlp_request(
     // llm stream detection
     let mut is_llm_stream = false;
     let mut need_mark_llm_stream = false;
-    if infra::schema::get_is_llm_stream(org_id, &traces_stream_name, StreamType::Traces).await {
+    if config::get_config().common.genai_processing_enabled
+        && infra::schema::get_is_llm_stream(org_id, &traces_stream_name, StreamType::Traces).await
+    {
         is_llm_stream = true;
         if let Err(e) = super::db::schema::ensure_gen_ai_fields_in_schema(
             org_id,
@@ -606,7 +621,8 @@ pub async fn handle_otlp_request(
                 // set This handles the case where service.name is not present in
                 // resource attributes
                 let scope_name = inst_span.scope.as_ref().map(|s| s.name.as_str());
-                let is_llm_span = is_llm_trace(&span_att_map, scope_name);
+                let is_llm_span = config::get_config().common.genai_processing_enabled
+                    && is_llm_trace(&span_att_map, scope_name);
                 if is_llm_span
                     && !service_name_explicitly_set
                     && let Some(val) = otel_processor.extract_service_name_from_span(&span_att_map)
@@ -1169,7 +1185,9 @@ pub async fn ingest_json(
     // llm stream detection
     let mut is_llm_stream = false;
     let mut need_mark_llm_stream = false;
-    if infra::schema::get_is_llm_stream(org_id, traces_stream_name, StreamType::Traces).await {
+    if config::get_config().common.genai_processing_enabled
+        && infra::schema::get_is_llm_stream(org_id, traces_stream_name, StreamType::Traces).await
+    {
         is_llm_stream = true;
         if let Err(e) = super::db::schema::ensure_gen_ai_fields_in_schema(
             org_id,
@@ -1306,7 +1324,10 @@ pub async fn ingest_json(
         }
 
         // check if we have any LLM related attributes
-        if !is_llm_stream && detect_llm_stream(|k| record_val.contains_key(k)) {
+        if cfg.common.genai_processing_enabled
+            && !is_llm_stream
+            && detect_llm_stream(|k| record_val.contains_key(k))
+        {
             is_llm_stream = true;
             need_mark_llm_stream = true;
         }
@@ -1730,6 +1751,24 @@ mod tests {
 
     use super::span_duration_micros;
     use crate::ingestion::grpc::get_val_for_attr;
+
+    #[test]
+    fn disabled_genai_normalization_preserves_values_and_types() {
+        let mut value = serde_json::json!({
+            "gen_ai_usage_input_tokens": "123",
+            "gen_ai_usage_cost_total": "1.25",
+            "gen_ai_input_messages": "[{\"content\":\"raw\"}]",
+            "langfuse_observation_input": "different"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let original = value.clone();
+        super::normalize_llm_field_types_when_enabled(&mut value, false);
+        assert_eq!(value, original);
+        super::normalize_llm_field_types_when_enabled(&mut value, true);
+        assert_eq!(value["gen_ai_usage_input_tokens"], serde_json::json!(123));
+    }
 
     #[test]
     fn test_get_val_for_attr() {

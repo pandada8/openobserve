@@ -1,0 +1,79 @@
+use crate::compiler::prelude::*;
+
+fn keys(value: Value) -> Resolved {
+    let object = value.try_object()?;
+    let keys = object.into_keys().map(Value::from);
+    Ok(Value::Array(keys.collect()))
+}
+
+#[derive(Debug)]
+pub struct Keys;
+
+impl Function for Keys {
+    fn identifier(&self) -> &'static str {
+        "keys"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Returns the keys from the object passed into the function."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Enumerate.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::ARRAY
+    }
+
+    fn return_rules(&self) -> &'static [&'static str] {
+        &["Returns an array of all the keys"]
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::OBJECT,
+            "The object to extract keys from.",
+        )];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[example! {
+            title: "Get keys from the object",
+            source: indoc! {r#"
+                keys({
+                    "key1": "val1",
+                    "key2": "val2"
+                })
+            "#},
+            result: Ok(r#"["key1", "key2"]"#),
+        }]
+    }
+
+    fn compile(
+        &self,
+        _state: &TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        Ok(KeysFn { value }.as_expr())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct KeysFn {
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for KeysFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        keys(self.value.resolve(ctx)?)
+    }
+
+    fn type_def(&self, _state: &state::TypeState) -> TypeDef {
+        TypeDef::array(Collection::empty().with_unknown(Kind::bytes())).infallible()
+    }
+}

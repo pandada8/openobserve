@@ -1594,6 +1594,26 @@ pub async fn logout(
         .unwrap()
 }
 
+pub async fn start_oss_drain() -> Response {
+    if !LOCAL_NODE.is_ingester() {
+        return MetaHttpResponse::bad_request("Not an ingester");
+    }
+    config::drain::begin();
+    if let Err(e) = common::infra::cluster::set_unschedulable().await {
+        return MetaHttpResponse::internal_error(e);
+    }
+    tokio::spawn(async {
+        if let Err(e) = ingester::drain::run().await {
+            log::error!("Ingester drain failed: {e}");
+        }
+    });
+    MetaHttpResponse::json(ingester::drain::status())
+}
+
+pub async fn oss_drain_status() -> Response {
+    MetaHttpResponse::json(ingester::drain::status())
+}
+
 pub async fn enable_node(
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
@@ -1610,6 +1630,11 @@ pub async fn enable_node(
             );
         }
     };
+    if enable && config::drain::is_draining() {
+        return MetaHttpResponse::bad_request(
+            "Drain is irreversible; restart with the retained PVC to resume",
+        );
+    }
     node.scheduled = enable;
     if !node.scheduled {
         // release all the searching files

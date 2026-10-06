@@ -45,6 +45,7 @@ profiling = ["openobserve-api-management/profiling"]
 
 [dependencies]
 common.workspace = true
+ingester.workspace = true
 audit.workspace = true
 db.workspace = true
 openobserve-core.workspace = true

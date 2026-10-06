@@ -2021,6 +2021,12 @@ pub struct Common {
         help = "Enable user-defined model pricing. When true, uses DB pricing definitions and syncs from GitHub. When false, falls back to hardcoded built-in pricing only."
     )]
     pub model_pricing_enabled: bool,
+
+    #[env_config(name = "ZO_GENAI_PROCESSING_ENABLED", default = true)]
+    pub genai_processing_enabled: bool,
+
+    #[env_config(name = "ZO_INGESTER_DRAIN_TIMEOUT_SECS", default = 1000)]
+    pub ingester_drain_timeout_secs: u64,
     #[env_config(
         name = "ZO_MODEL_PRICING_SOURCE_URL",
         default = "https://raw.githubusercontent.com/openobserve/sdr_patterns/refs/heads/main/llm_pricing.json",

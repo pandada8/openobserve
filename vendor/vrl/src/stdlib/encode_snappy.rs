@@ -1,0 +1,107 @@
+use crate::compiler::prelude::*;
+use snap::raw::Encoder;
+
+fn encode_snappy(value: Value) -> Resolved {
+    let value = value.try_bytes()?;
+    let mut encoder = Encoder::new();
+    let result = encoder.compress_vec(&value);
+
+    match result {
+        Ok(buf) => Ok(Value::Bytes(buf.into())),
+        Err(_) => Err("unable to encode value with Snappy encoder".into()),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EncodeSnappy;
+
+impl Function for EncodeSnappy {
+    fn identifier(&self) -> &'static str {
+        "encode_snappy"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Encodes the `value` to Snappy."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Codec.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &["`value` cannot be encoded into a Snappy string."]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[example! {
+            title: "Encode to Snappy",
+            source: r#"encode_base64(encode_snappy!("The quick brown fox jumps over 13 lazy dogs."))"#,
+            result: Ok("LKxUaGUgcXVpY2sgYnJvd24gZm94IGp1bXBzIG92ZXIgMTMgbGF6eSBkb2dzLg=="),
+        }]
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+
+        Ok(EncodeSnappyFn { value }.as_expr())
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::BYTES,
+            "The string to encode.",
+        )];
+        PARAMETERS
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EncodeSnappyFn {
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for EncodeSnappyFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+
+        encode_snappy(value)
+    }
+
+    fn type_def(&self, _state: &state::TypeState) -> TypeDef {
+        // Always fallible due to the possibility of decoding errors that VRL can't detect
+        TypeDef::bytes().fallible()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::value;
+    use nom::AsBytes;
+
+    fn decode_base64(text: &str) -> Vec<u8> {
+        base64_simd::STANDARD
+            .decode_to_vec(text)
+            .expect("Cannot decode from Base64")
+    }
+
+    test_function![
+        encode_snappy => EncodeSnappy;
+
+        success {
+            args: func_args![value: value!("The quick brown fox jumps over 13 lazy dogs.")],
+            want: Ok(value!(decode_base64("LKxUaGUgcXVpY2sgYnJvd24gZm94IGp1bXBzIG92ZXIgMTMgbGF6eSBkb2dzLg==").as_bytes())),
+            tdef: TypeDef::bytes().fallible(),
+        }
+    ];
+}

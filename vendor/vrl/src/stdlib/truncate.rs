@@ -1,0 +1,207 @@
+use crate::compiler::prelude::*;
+
+fn truncate(value: &Value, limit: Value, suffix: &Value) -> Resolved {
+    let mut value = value.try_bytes_utf8_lossy()?.into_owned();
+    let limit = limit.try_integer()?;
+    // TODO consider removal options
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let limit = if limit < 0 { 0 } else { limit as usize };
+    let suffix = suffix.try_bytes_utf8_lossy()?.to_string();
+    let pos = if let Some((pos, chr)) = value.char_indices().take(limit).last() {
+        // char_indices gives us the starting position of the character at limit,
+        // we want the end position.
+        pos + chr.len_utf8()
+    } else {
+        // We have an empty string
+        0
+    };
+    if value.len() > pos {
+        value.truncate(pos);
+        if !suffix.is_empty() {
+            value.push_str(&suffix);
+        }
+    }
+    Ok(value.into())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Truncate;
+
+impl Function for Truncate {
+    fn identifier(&self) -> &'static str {
+        "truncate"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Truncates the `value` string up to the `limit` number of characters."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::String.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn return_rules(&self) -> &'static [&'static str] {
+        &["The string is returned unchanged its length is less than `limit`."]
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[
+            Parameter::required("value", kind::BYTES, "The string to truncate."),
+            Parameter::required(
+                "limit",
+                kind::INTEGER,
+                "The number of characters to truncate the string after.",
+            ),
+            Parameter::optional(
+                "suffix",
+                kind::BYTES,
+                indoc! {"
+                    A custom suffix to be appended to truncated strings. If a custom `suffix` is
+                    provided, the total length of the string will be `limit + <suffix length>`.
+                "},
+            ),
+        ];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Truncate a string",
+                source: r#"truncate("A rather long sentence.", limit: 11, suffix: "...")"#,
+                result: Ok("A rather lo..."),
+            },
+            example! {
+                title: "Truncate a string (custom suffix)",
+                source: r#"truncate("A rather long sentence.", limit: 11, suffix: "[TRUNCATED]")"#,
+                result: Ok("A rather lo[TRUNCATED]"),
+            },
+            example! {
+                title: "Truncate",
+                source: r#"truncate("foobar", 3)"#,
+                result: Ok("foo"),
+            },
+        ]
+    }
+
+    fn compile(
+        &self,
+        _state: &TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let limit = arguments.required("limit");
+        let suffix = arguments.optional("suffix").unwrap_or(expr!(""));
+
+        Ok(TruncateFn {
+            value,
+            limit,
+            suffix,
+        }
+        .as_expr())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TruncateFn {
+    value: Box<dyn Expression>,
+    limit: Box<dyn Expression>,
+    suffix: Box<dyn Expression>,
+}
+
+impl FunctionExpression for TruncateFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+        let limit = self.limit.resolve(ctx)?;
+        let suffix = self.suffix.resolve(ctx)?;
+
+        truncate(&value, limit, &suffix)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::bytes().infallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    test_function![
+        truncate => Truncate;
+
+        empty {
+             args: func_args![value: "Super",
+                              limit: 0,
+             ],
+             want: Ok(""),
+             tdef: TypeDef::bytes().infallible(),
+         }
+
+        ellipsis {
+            args: func_args![value: "Super",
+                             limit: 0,
+                             suffix: "..."
+            ],
+            want: Ok("..."),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        complete {
+            args: func_args![value: "Super",
+                             limit: 10
+            ],
+            want: Ok("Super"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        exact {
+            args: func_args![value: "Super",
+                             limit: 5,
+                             suffix: "."
+            ],
+            want: Ok("Super"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        big {
+            args: func_args![value: "Supercalifragilisticexpialidocious",
+                             limit: 5
+            ],
+            want: Ok("Super"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        big_ellipsis {
+            args: func_args![value: "Supercalifragilisticexpialidocious",
+                             limit: 5,
+                             suffix: "..."
+            ],
+            want: Ok("Super..."),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        unicode {
+            args: func_args![value: "♔♕♖♗♘♙♚♛♜♝♞♟",
+                             limit: 6,
+                             suffix: "..."
+            ],
+            want: Ok("♔♕♖♗♘♙..."),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        alternative_suffix {
+            args: func_args![value: "Super",
+                             limit: 1,
+                             suffix: "[TRUNCATED]"
+            ],
+            want: Ok("S[TRUNCATED]"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+    ];
+}

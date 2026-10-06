@@ -1,0 +1,110 @@
+use crate::compiler::prelude::*;
+use nom::AsBytes;
+
+fn decode_zstd(value: Value) -> Resolved {
+    let value = value.try_bytes()?;
+    let result = zstd::decode_all(value.as_bytes());
+
+    match result {
+        Ok(decoded_bytes) => Ok(Value::Bytes(decoded_bytes.into())),
+        Err(_) => Err("unable to decode value with Zstd decoder".into()),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeZstd;
+
+impl Function for DecodeZstd {
+    fn identifier(&self) -> &'static str {
+        "decode_zstd"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Decodes the `value` (a [Zstandard](https://facebook.github.io/zstd) string) into its original string."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Codec.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &["`value` isn't a valid encoded Zstd string."]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[example! {
+            title: "Decode Zstd data",
+            source: r#"decode_zstd!(decode_base64!("KLUv/QBY/QEAYsQOFKClbQBedqXsb96EWDax/f/F/z+gNU4ZTInaUeAj82KqPFjUzKqhcfDqAIsLvAsnY1bI/N2mHzDixRQA"))"#,
+            result: Ok("you_have_successfully_decoded_me.congratulations.you_are_breathtaking."),
+        }]
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+
+        Ok(DecodeZstdFn { value }.as_expr())
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::BYTES,
+            "The [Zstandard](https://facebook.github.io/zstd) data to decode.",
+        )];
+        PARAMETERS
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DecodeZstdFn {
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for DecodeZstdFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+
+        decode_zstd(value)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        // Always fallible due to the possibility of decoding errors that VRL can't detect
+        TypeDef::bytes().fallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+    use nom::AsBytes;
+
+    fn get_encoded_bytes(text: &str) -> Vec<u8> {
+        zstd::encode_all(text.as_bytes(), 0).expect("Cannot encode bytes with Zstd encoder")
+    }
+
+    test_function![
+        decode_zstd => DecodeZstd;
+
+        right_zstd {
+            args: func_args![value: value!(get_encoded_bytes("sample").as_bytes())],
+            want: Ok(value!(b"sample")),
+            tdef: TypeDef::bytes().fallible(),
+        }
+
+        wrong_zstd {
+            args: func_args![value: value!("some_bytes")],
+            want: Err("unable to decode value with Zstd decoder"),
+            tdef: TypeDef::bytes().fallible(),
+        }
+    ];
+}

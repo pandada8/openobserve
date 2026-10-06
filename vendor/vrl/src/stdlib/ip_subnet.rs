@@ -1,0 +1,226 @@
+use crate::compiler::prelude::*;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+fn ip_subnet(value: &Value, mask: &Value) -> Resolved {
+    let value: IpAddr = value
+        .try_bytes_utf8_lossy()?
+        .parse()
+        .map_err(|err| format!("unable to parse IP address: {err}"))?;
+    let mask = mask.try_bytes_utf8_lossy()?;
+    let mask = if mask.starts_with('/') {
+        // The parameter is a subnet.
+        let subnet = parse_subnet(&mask)?;
+        match value {
+            IpAddr::V4(_) => {
+                if subnet > 32 {
+                    return Err("subnet cannot be greater than 32 for ipv4 addresses".into());
+                }
+
+                ipv4_mask(subnet)
+            }
+            IpAddr::V6(_) => {
+                if subnet > 128 {
+                    return Err("subnet cannot be greater than 128 for ipv6 addresses".into());
+                }
+
+                ipv6_mask(subnet)
+            }
+        }
+    } else {
+        // The parameter is a mask.
+        mask.parse()
+            .map_err(|err| format!("unable to parse mask: {err}"))?
+    };
+    Ok(mask_ips(value, mask)?.to_string().into())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IpSubnet;
+
+impl Function for IpSubnet {
+    fn identifier(&self) -> &'static str {
+        "ip_subnet"
+    }
+
+    fn usage(&self) -> &'static str {
+        indoc! {"
+            Extracts the subnet address from the `ip` using the supplied `subnet`.
+        "}
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Ip.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &[
+            "`ip` is not a valid IP address.",
+            "`subnet` is not a valid subnet.",
+        ]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn notices(&self) -> &'static [&'static str] {
+        &[indoc! {"
+            Works with both IPv4 and IPv6 addresses. The IP version for the mask must be the same as
+            the supplied address.
+        "}]
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[
+            Parameter::required("value", kind::BYTES, "The IP address (v4 or v6)."),
+            Parameter::required("subnet", kind::BYTES, "The subnet to extract from the IP address. This can be either a prefix length like `/8` or a net mask
+like `255.255.0.0`. The net mask can be either an IPv4 or IPv6 address."),
+        ];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "IPv4 subnet",
+                source: r#"ip_subnet!("192.168.10.32", "255.255.255.0")"#,
+                result: Ok("192.168.10.0"),
+            },
+            example! {
+                title: "IPv6 subnet",
+                source: r#"ip_subnet!("2404:6800:4003:c02::64", "/32")"#,
+                result: Ok("2404:6800::"),
+            },
+            example! {
+                title: "Subnet /1",
+                source: r#"ip_subnet!("192.168.0.1", "/1")"#,
+                result: Ok("128.0.0.0"),
+            },
+        ]
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let subnet = arguments.required("subnet");
+
+        Ok(IpSubnetFn { value, subnet }.as_expr())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IpSubnetFn {
+    value: Box<dyn Expression>,
+    subnet: Box<dyn Expression>,
+}
+
+impl FunctionExpression for IpSubnetFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+        let mask = self.subnet.resolve(ctx)?;
+
+        ip_subnet(&value, &mask)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::bytes().fallible()
+    }
+}
+
+/// Parses a subnet in the form "/8" returns the number.
+fn parse_subnet(subnet: &str) -> ExpressionResult<u32> {
+    let subnet = subnet[1..]
+        .parse()
+        .map_err(|_| format!("{subnet} is not a valid subnet"))?;
+    Ok(subnet)
+}
+
+/// Masks the address by performing a bitwise AND between the two addresses.
+fn mask_ips(ip: IpAddr, mask: IpAddr) -> ExpressionResult<IpAddr> {
+    match (ip, mask) {
+        (IpAddr::V4(addr), IpAddr::V4(mask)) => {
+            let addr: u32 = addr.into();
+            let mask: u32 = mask.into();
+            Ok(Ipv4Addr::from(addr & mask).into())
+        }
+        (IpAddr::V6(addr), IpAddr::V6(mask)) => {
+            let mut masked = [0; 8];
+            for ((masked, addr), mask) in masked
+                .iter_mut()
+                .zip(addr.segments().iter())
+                .zip(mask.segments().iter())
+            {
+                *masked = addr & mask;
+            }
+
+            Ok(IpAddr::from(masked))
+        }
+        (IpAddr::V6(_), IpAddr::V4(_)) => {
+            Err("attempting to mask an ipv6 address with an ipv4 mask".into())
+        }
+        (IpAddr::V4(_), IpAddr::V6(_)) => {
+            Err("attempting to mask an ipv4 address with an ipv6 mask".into())
+        }
+    }
+}
+
+/// Returns an ipv4 address that masks out the given number of bits.
+fn ipv4_mask(subnet_bits: u32) -> IpAddr {
+    let bits = !0u32 << (32 - subnet_bits);
+    Ipv4Addr::from(bits).into()
+}
+
+/// Returns an ipv6 address that masks out the given number of bits.
+fn ipv6_mask(subnet_bits: u32) -> IpAddr {
+    let bits = !0u128 << (128 - subnet_bits);
+    Ipv6Addr::from(bits).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+
+    test_function![
+        ip_subnet => IpSubnet;
+
+        ipv4 {
+            args: func_args![value: "192.168.10.23",
+                             subnet: "255.255.0.0"],
+            want: Ok(value!("192.168.0.0")),
+            tdef: TypeDef::bytes().fallible(),
+        }
+
+        ipv6 {
+            args: func_args![value: "2404:6800:4003:c02::64",
+                             subnet: "ff00::"],
+            want: Ok(value!("2400::")),
+            tdef: TypeDef::bytes().fallible(),
+        }
+
+        ipv4_subnet {
+            args: func_args![value: "192.168.10.23",
+                             subnet: "/16"],
+            want: Ok(value!("192.168.0.0")),
+            tdef: TypeDef::bytes().fallible(),
+        }
+
+        ipv4_smaller_subnet {
+            args: func_args![value: "192.168.10.23",
+                             subnet: "/12"],
+            want: Ok(value!("192.160.0.0")),
+            tdef: TypeDef::bytes().fallible(),
+        }
+
+        ipv6_subnet {
+            args: func_args![value: "2404:6800:4003:c02::64",
+                             subnet: "/32"],
+            want: Ok(value!("2404:6800::")),
+            tdef: TypeDef::bytes().fallible(),
+        }
+    ];
+}

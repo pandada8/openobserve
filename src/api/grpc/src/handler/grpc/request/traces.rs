@@ -31,6 +31,8 @@ impl TraceService for TraceServer {
         &self,
         request: tonic::Request<ExportTraceServiceRequest>,
     ) -> Result<tonic::Response<ExportTraceServiceResponse>, tonic::Status> {
+        let _admission = config::drain::admit(false)
+            .ok_or_else(|| tonic::Status::unavailable("Ingester is draining"))?;
         let start = std::time::Instant::now();
         let cfg = config::get_config();
 

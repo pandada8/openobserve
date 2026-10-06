@@ -1,0 +1,4 @@
+requests
+semver
+tomlkit
+towncrier

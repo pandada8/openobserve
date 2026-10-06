@@ -1,0 +1,237 @@
+use crate::compiler::prelude::*;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod non_wasm {
+    use crate::compiler::prelude::*;
+    use crate::diagnostic::{Label, Span};
+    use crate::value::Value;
+    pub(super) use std::sync::Arc;
+    use std::{collections::BTreeMap, fmt};
+
+    fn parse_grok(value: &Value, pattern: &Arc<grok::Pattern>) -> Resolved {
+        let bytes = value.try_bytes_utf8_lossy()?;
+        match pattern.match_against(&bytes) {
+            Some(matches) => {
+                let mut result = BTreeMap::new();
+
+                for (name, value) in &matches {
+                    result.insert(name.to_string().into(), Value::from(value));
+                }
+
+                Ok(Value::from(result))
+            }
+            None => Err("unable to parse input with grok pattern".into()),
+        }
+    }
+
+    #[derive(Debug)]
+    pub(crate) enum Error {
+        InvalidGrokPattern(grok::Error),
+    }
+
+    impl fmt::Display for Error {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Error::InvalidGrokPattern(err) => err.fmt(f),
+            }
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    impl DiagnosticMessage for Error {
+        fn code(&self) -> usize {
+            109
+        }
+
+        fn labels(&self) -> Vec<Label> {
+            match self {
+                Error::InvalidGrokPattern(err) => {
+                    vec![Label::primary(
+                        format!("grok pattern error: {err}"),
+                        Span::default(),
+                    )]
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub(super) struct ParseGrokFn {
+        pub(super) value: Box<dyn Expression>,
+
+        // Wrapping pattern in an Arc, as cloning the pattern could otherwise be expensive.
+        pub(super) pattern: Arc<grok::Pattern>,
+    }
+
+    impl FunctionExpression for ParseGrokFn {
+        fn resolve(&self, ctx: &mut Context) -> Resolved {
+            let value = self.value.resolve(ctx)?;
+            let pattern = self.pattern.clone();
+
+            parse_grok(&value, &pattern)
+        }
+
+        fn type_def(&self, _: &TypeState) -> TypeDef {
+            TypeDef::object(Collection::any()).fallible()
+        }
+    }
+}
+
+#[allow(clippy::wildcard_imports)]
+#[cfg(not(target_arch = "wasm32"))]
+use non_wasm::*;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParseGrok;
+
+impl Function for ParseGrok {
+    fn identifier(&self) -> &'static str {
+        "parse_grok"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Parses the `value` using the [`grok`](https://github.com/daschl/grok/tree/master/patterns) format. All patterns [listed here](https://github.com/daschl/grok/tree/master/patterns) are supported."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Parse.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &["`value` fails to parse using the provided `pattern`."]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::OBJECT
+    }
+
+    fn notices(&self) -> &'static [&'static str] {
+        &[indoc! {"
+            We recommend using community-maintained Grok patterns when possible, as they're more
+            likely to be properly vetted and improved over time than bespoke patterns.
+        "}]
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[
+            Parameter::required("value", kind::BYTES, "The string to parse."),
+            Parameter::required(
+                "pattern",
+                kind::BYTES,
+                "The [Grok pattern](https://github.com/daschl/grok/tree/master/patterns).",
+            ),
+        ];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[example! {
+            title: "Parse using Grok",
+            source: indoc! {r#"
+                value = "2020-10-02T23:22:12.223222Z info Hello world"
+                pattern = "%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:level} %{GREEDYDATA:message}"
+
+                parse_grok!(value, pattern)
+            "#},
+            result: Ok(indoc! {r#"
+                {
+                    "timestamp": "2020-10-02T23:22:12.223222Z",
+                    "level": "info",
+                    "message": "Hello world"
+                }
+            "#}),
+        }]
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn compile(
+        &self,
+        state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+
+        let pattern = arguments
+            .required_literal("pattern", state)?
+            .try_bytes_utf8_lossy()
+            .expect("grok pattern not bytes")
+            .into_owned();
+
+        let grok = grok::Grok::with_default_patterns();
+        let pattern =
+            Arc::new(grok.compile(&pattern, true).map_err(|e| {
+                Box::new(Error::InvalidGrokPattern(e)) as Box<dyn DiagnosticMessage>
+            })?);
+
+        Ok(ParseGrokFn { value, pattern }.as_expr())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        ctx: &mut FunctionCompileContext,
+        _: ArgumentList,
+    ) -> Compiled {
+        Ok(super::WasmUnsupportedFunction::new(
+            ctx.span(),
+            TypeDef::object(Collection::any()).fallible(),
+        )
+        .as_expr())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::btreemap;
+    use crate::value::Value;
+
+    use super::*;
+
+    test_function![
+        parse_grok => ParseGrok;
+
+        invalid_grok {
+            args: func_args![ value: "foo",
+                              pattern: "%{NOG}"],
+            want: Err("The given pattern definition name \"NOG\" could not be found in the definition map"),
+            tdef: TypeDef::object(Collection::any()).fallible(),
+        }
+
+        error {
+            args: func_args![ value: "an ungrokkable message",
+                              pattern: "%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:level} %{GREEDYDATA:message}"],
+            want: Err("unable to parse input with grok pattern"),
+            tdef: TypeDef::object(Collection::any()).fallible(),
+        }
+
+        error2 {
+            args: func_args![ value: "2020-10-02T23:22:12.223222Z an ungrokkable message",
+                              pattern: "%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:level} %{GREEDYDATA:message}"],
+            want: Err("unable to parse input with grok pattern"),
+            tdef: TypeDef::object(Collection::any()).fallible(),
+        }
+
+        parsed {
+            args: func_args![ value: "2020-10-02T23:22:12.223222Z info Hello world",
+                              pattern: "%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:level} %{GREEDYDATA:message}"],
+            want: Ok(Value::from(btreemap! {
+                "timestamp" => "2020-10-02T23:22:12.223222Z",
+                "level" => "info",
+                "message" => "Hello world",
+            })),
+            tdef: TypeDef::object(Collection::any()).fallible(),
+        }
+
+        parsed2 {
+            args: func_args![ value: "2020-10-02T23:22:12.223222Z",
+                              pattern: "(%{TIMESTAMP_ISO8601:timestamp}|%{LOGLEVEL:level})"],
+            want: Ok(Value::from(btreemap! {
+                "timestamp" => "2020-10-02T23:22:12.223222Z",
+            })),
+            tdef: TypeDef::object(Collection::any()).fallible(),
+        }
+    ];
+}

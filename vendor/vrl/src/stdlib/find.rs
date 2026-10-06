@@ -1,0 +1,217 @@
+use crate::compiler::prelude::*;
+use std::sync::LazyLock;
+
+static DEFAULT_FROM: LazyLock<Value> = LazyLock::new(|| Value::Integer(0));
+
+static PARAMETERS: LazyLock<Vec<Parameter>> = LazyLock::new(|| {
+    vec![
+        Parameter::required("value", kind::BYTES, "The string to find the pattern in."),
+        Parameter::required(
+            "pattern",
+            kind::BYTES | kind::REGEX,
+            "The regular expression or string pattern to match against.",
+        ),
+        Parameter::optional("from", kind::INTEGER, "Offset to start searching.")
+            .default(&DEFAULT_FROM),
+    ]
+});
+
+#[allow(clippy::cast_possible_wrap)]
+fn find(value: Value, pattern: Value, from: Value) -> Resolved {
+    // TODO consider removal options
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let from = from.try_integer()? as usize;
+
+    Ok(FindFn::find(value, pattern, from)?
+        .map_or(Value::Null, |value| Value::Integer(value as i64)))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Find;
+
+impl Function for Find {
+    fn identifier(&self) -> &'static str {
+        "find"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Determines from left to right the start position of the first found element in `value` that matches `pattern`. Returns `-1` if not found."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::String.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::INTEGER
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        PARAMETERS.as_slice()
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Match text",
+                source: r#"find("foobar", "bar")"#,
+                result: Ok("3"),
+            },
+            example! {
+                title: "Match text at start",
+                source: r#"find("foobar", "foo")"#,
+                result: Ok("0"),
+            },
+            example! {
+                title: "Match regex",
+                source: r#"find("foobar", r'b.r')"#,
+                result: Ok("3"),
+            },
+            example! {
+                title: "No matches",
+                source: r#"find("foobar", "baz")"#,
+                result: Ok("null"),
+            },
+            example! {
+                title: "With an offset",
+                source: r#"find("foobarfoobarfoo", "bar", 4)"#,
+                result: Ok("9"),
+            },
+        ]
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let pattern = arguments.required("pattern");
+        let from = arguments.optional("from");
+
+        Ok(FindFn {
+            value,
+            pattern,
+            from,
+        }
+        .as_expr())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FindFn {
+    value: Box<dyn Expression>,
+    pattern: Box<dyn Expression>,
+    from: Option<Box<dyn Expression>>,
+}
+
+impl FindFn {
+    fn find_regex_in_str(value: &str, regex: &ValueRegex, offset: usize) -> Option<usize> {
+        regex.find_at(value, offset).map(|found| found.start())
+    }
+
+    fn find_bytes_in_bytes(value: &Bytes, pattern: &Bytes, offset: usize) -> Option<usize> {
+        if pattern.len() > value.len() {
+            return None;
+        }
+        for from in offset..=(value.len() - pattern.len()) {
+            let to = from + pattern.len();
+            if value[from..to] == *pattern {
+                return Some(from);
+            }
+        }
+        None
+    }
+
+    fn find(value: Value, pattern: Value, offset: usize) -> ExpressionResult<Option<usize>> {
+        match pattern {
+            Value::Bytes(bytes) => Ok(Self::find_bytes_in_bytes(
+                &value.try_bytes()?,
+                &bytes,
+                offset,
+            )),
+            Value::Regex(regex) => Ok(Self::find_regex_in_str(
+                &value.try_bytes_utf8_lossy()?,
+                &regex,
+                offset,
+            )),
+            other => Err(ValueError::Expected {
+                got: other.kind(),
+                expected: Kind::bytes() | Kind::regex(),
+            }
+            .into()),
+        }
+    }
+}
+
+impl FunctionExpression for FindFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+        let pattern = self.pattern.resolve(ctx)?;
+        let from = self
+            .from
+            .map_resolve_with_default(ctx, || DEFAULT_FROM.clone())?;
+
+        find(value, pattern, from)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::integer().infallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use regex::Regex;
+
+    use crate::value;
+
+    use super::*;
+
+    test_function![
+        find => Find;
+
+        str_matching_end {
+            args: func_args![value: "foobar", pattern: "bar"],
+            want: Ok(value!(3)),
+            tdef: TypeDef::integer().infallible(),
+        }
+
+        str_matching_beginning {
+            args: func_args![value: "foobar", pattern: "foo"],
+            want: Ok(value!(0)),
+            tdef: TypeDef::integer().infallible(),
+        }
+
+        str_matching_middle {
+            args: func_args![value: "foobar", pattern: "ob"],
+            want: Ok(value!(2)),
+            tdef: TypeDef::integer().infallible(),
+        }
+
+        str_too_long {
+            args: func_args![value: "foo", pattern: "foobar"],
+            want: Ok(value!(null)),
+            tdef: TypeDef::integer().infallible(),
+        }
+
+        regex_matching_end {
+            args: func_args![value: "foobar", pattern: Value::Regex(Regex::new("bar").unwrap().into())],
+            want: Ok(value!(3)),
+            tdef: TypeDef::integer().infallible(),
+        }
+
+        regex_matching_start {
+            args: func_args![value: "foobar", pattern: Value::Regex(Regex::new("fo+z?").unwrap().into())],
+            want: Ok(value!(0)),
+            tdef: TypeDef::integer().infallible(),
+        }
+
+        wrong_pattern {
+            args: func_args![value: "foobar", pattern: Value::Integer(42)],
+            want: Err("expected string or regex, got integer"),
+            tdef: TypeDef::integer().infallible(),
+        }
+    ];
+}

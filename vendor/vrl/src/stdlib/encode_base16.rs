@@ -1,0 +1,89 @@
+use crate::compiler::prelude::*;
+
+fn encode_base16(value: Value) -> Resolved {
+    let value = value.try_bytes()?;
+    Ok(base16::encode_lower(&value).into())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EncodeBase16;
+
+impl Function for EncodeBase16 {
+    fn identifier(&self) -> &'static str {
+        "encode_base16"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Encodes the `value` to [Base16](https://en.wikipedia.org/wiki/Hexadecimal)."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Codec.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::BYTES,
+            "The string to encode.",
+        )];
+        PARAMETERS
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+
+        Ok(EncodeBase16Fn { value }.as_expr())
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[example! {
+            title: "Encode to Base16",
+            source: r#"encode_base16("some string value")"#,
+            result: Ok("736f6d6520737472696e672076616c7565"),
+        }]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EncodeBase16Fn {
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for EncodeBase16Fn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+
+        encode_base16(value)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::bytes().infallible()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::value;
+
+    test_function![
+        encode_base16 => EncodeBase16;
+
+        with_defaults {
+            args: func_args![value: value!("some+=string/value")],
+            want: Ok(value!("736f6d652b3d737472696e672f76616c7565")),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+    ];
+}

@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, LazyLock as Lazy,
-        atomic::{AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -62,6 +62,7 @@ pub struct Writer {
     wal: Arc<RwLock<WalWriter>>,
     memtable: Arc<RwLock<MemTable>>,
     next_seq: AtomicU64,
+    drain_flushed: AtomicBool,
     created_at: AtomicI64,
     write_queue: Arc<mpsc::Sender<(WriterSignal, crate::ProcessedBatch, bool)>>,
 }
@@ -166,7 +167,7 @@ pub async fn get_writer(
     }
     let mut is_existing_writer_channel_closed = false;
     if let Some(w) = data {
-        if !w.is_channel_closed() {
+        if !w.is_channel_closed() || config::drain::is_draining() {
             return w.clone();
         }
         is_existing_writer_channel_closed = true;
@@ -267,8 +268,19 @@ pub async fn flush_all() -> Result<()> {
         let mut w = w.write().await;
         let keys = w.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            if let Some(r) = w.remove(&key) {
+            let writer = if config::drain::is_draining() {
+                w.get(&key).cloned()
+            } else {
+                w.remove(&key)
+            };
+            if let Some(r) = writer {
+                if r.drain_flushed.load(Ordering::Acquire) {
+                    continue;
+                }
                 r.flush().await?; // close writer
+                if config::drain::is_draining() {
+                    r.drain_flushed.store(true, Ordering::Release);
+                }
                 metrics::INGEST_MEMTABLE_FILES
                     .with_label_values::<&str>(&[])
                     .dec();
@@ -326,6 +338,7 @@ impl Writer {
             )),
             memtable: Arc::new(RwLock::new(MemTable::new())),
             next_seq,
+            drain_flushed: AtomicBool::new(false),
             created_at: AtomicI64::new(now),
             write_queue: Arc::new(tx),
         };
@@ -398,6 +411,7 @@ impl Writer {
     }
 
     pub async fn write_batch(&self, entries: Vec<Entry>, fsync: bool) -> Result<()> {
+        let _admission = config::drain::admit(true).ok_or(Error::Draining)?;
         if entries.is_empty() {
             return Ok(());
         }

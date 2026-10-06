@@ -1,0 +1,93 @@
+use crate::compiler::prelude::*;
+
+fn downcase(value: &Value) -> Resolved {
+    Ok(value.try_bytes_utf8_lossy()?.to_lowercase().into())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Downcase;
+
+impl Function for Downcase {
+    fn identifier(&self) -> &'static str {
+        "downcase"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Downcases the `value` string, where downcase is defined according to the Unicode Derived Core Property Lowercase."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::String.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[Parameter::required(
+            "value",
+            kind::BYTES,
+            "The string to convert to lowercase.",
+        )];
+        PARAMETERS
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+
+        Ok(DowncaseFn { value }.as_expr())
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Downcase a string",
+                source: r#"downcase("Hello, World!")"#,
+                result: Ok("hello, world!"),
+            },
+            example! {
+                title: "Downcase with number",
+                source: r#"downcase("FOO 2 BAR")"#,
+                result: Ok("foo 2 bar"),
+            },
+        ]
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DowncaseFn {
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for DowncaseFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+        downcase(&value)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::bytes().infallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+
+    test_function![
+        downcase => Downcase;
+
+        simple {
+            args: func_args![value: "FOO 2 bar"],
+            want: Ok(value!("foo 2 bar")),
+            tdef: TypeDef::bytes(),
+        }
+    ];
+}

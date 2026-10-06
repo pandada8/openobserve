@@ -180,7 +180,15 @@ async fn run_common(
         .add_service(node_svc)
         .add_service(cluster_info_svc)
         .serve_with_shutdown(gaddr, async {
-            shutdown_rx.await.ok();
+            tokio::select! {
+                _ = shutdown_rx => {},
+                _ = async {
+                    loop {
+                        if config::cluster::LOCAL_NODE.is_ingester() && config::drain::is_draining() { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                } => {},
+            }
             log::info!("gRPC server starts shutting down");
         })
         .await;

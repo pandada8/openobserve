@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+FROM public.ecr.aws/docker/library/node:24-trixie AS webbuilder
+WORKDIR /web
+COPY ./web /web/
+
+RUN npm ci
+RUN NODE_OPTIONS="--max-old-space-size=8192" npm run build
+
+FROM public.ecr.aws/zinclabs/rust:trixie-sccache AS builder
+
+# RUN rustup toolchain install nightly-2026-05-20
+# RUN rustup default nightly-2026-05-20
+# RUN rustup target add x86_64-unknown-linux-gnu
+# RUN diff -u <(rustc --print cfg) <(rustc -C target-cpu=native --print cfg)
+RUN rustc --version && sccache --version
+
+WORKDIR /openobserve
+COPY . /openobserve
+COPY --from=webbuilder /web/dist web/dist
+
+RUN cargo build --release --locked
+
+# FROM gcr.io/distroless/cc as runtime
+FROM public.ecr.aws/debian/debian:trixie-slim AS runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl jq htop iftop sysstat procps lsof net-tools && \
+    update-ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /openobserve/target/release/openobserve /
+RUN ["/openobserve", "init-dir", "-p", "/data/"]
+COPY --chmod=755 deploy/fork/prestop.sh /usr/local/bin/o2-prestop
+CMD ["/openobserve"]

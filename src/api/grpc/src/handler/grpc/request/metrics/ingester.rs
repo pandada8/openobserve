@@ -30,6 +30,8 @@ impl MetricsService for MetricsIngester {
         &self,
         request: tonic::Request<ExportMetricsServiceRequest>,
     ) -> Result<tonic::Response<ExportMetricsServiceResponse>, tonic::Status> {
+        let _admission = config::drain::admit(false)
+            .ok_or_else(|| tonic::Status::unavailable("Ingester is draining"))?;
         let start = std::time::Instant::now();
         let cfg = config::get_config();
 

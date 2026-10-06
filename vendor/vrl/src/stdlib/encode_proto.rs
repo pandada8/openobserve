@@ -1,0 +1,168 @@
+use super::util::example_path_or_basename;
+use crate::compiler::prelude::*;
+use crate::protobuf::descriptor::get_message_descriptor;
+use crate::protobuf::encode::encode_proto;
+use prost_reflect::MessageDescriptor;
+use std::ffi::OsString;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+
+#[derive(Clone, Copy, Debug)]
+pub struct EncodeProto;
+
+// This needs to be static because parse_proto needs to read a file
+// and the file path needs to be a literal.
+static EXAMPLE_ENCODE_PROTO_EXPR: LazyLock<&str> = LazyLock::new(|| {
+    let path = example_path_or_basename("protobuf/test_protobuf/v1/test_protobuf.desc");
+
+    Box::leak(
+        format!(
+            r#"encode_base64(encode_proto!({{ "name": "someone", "phones": [{{"number": "123456"}}]}}, "{path}", "test_protobuf.v1.Person"))"#
+        )
+        .into_boxed_str(),
+    )
+});
+
+static EXAMPLES: LazyLock<Vec<Example>> = LazyLock::new(|| {
+    vec![example! {
+        title: "Encode to proto",
+        source: &EXAMPLE_ENCODE_PROTO_EXPR,
+        result: Ok("Cgdzb21lb25lIggKBjEyMzQ1Ng=="),
+    }]
+});
+
+impl Function for EncodeProto {
+    fn identifier(&self) -> &'static str {
+        "encode_proto"
+    }
+
+    fn summary(&self) -> &'static str {
+        "Encodes a value into a protobuf"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Encodes the `value` into a protocol buffer payload."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Codec.as_ref()
+    }
+
+    fn internal_failure_reasons(&self) -> &'static [&'static str] {
+        &[
+            "`desc_file` file does not exist.",
+            "`message_type` message type does not exist in the descriptor file.",
+        ]
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        const PARAMETERS: &[Parameter] = &[
+            Parameter::required(
+                "value",
+                kind::ANY,
+                "The object to convert to a protocol buffer payload.",
+            ),
+            Parameter::required(
+                "desc_file",
+                kind::BYTES,
+                "The path to the protobuf descriptor set file. Must be a literal string.
+
+This file is the output of protoc -o <path> ...",
+            ),
+            Parameter::required(
+                "message_type",
+                kind::BYTES,
+                "The name of the message type to use for serializing.
+
+Must be a literal string.",
+            ),
+        ];
+        PARAMETERS
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        EXAMPLES.as_slice()
+    }
+
+    fn compile(
+        &self,
+        state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let desc_file = arguments.required_literal("desc_file", state)?;
+        let desc_file_str = desc_file
+            .try_bytes_utf8_lossy()
+            .expect("descriptor file must be a string");
+        let message_type = arguments.required_literal("message_type", state)?;
+        let message_type_str = message_type
+            .try_bytes_utf8_lossy()
+            .expect("message_type must be a string");
+        let os_string: OsString = desc_file_str.into_owned().into();
+        let path_buf = PathBuf::from(os_string);
+        let path = Path::new(&path_buf);
+        let descriptor =
+            get_message_descriptor(path, &message_type_str).expect("message type not found");
+
+        Ok(EncodeProtoFn { descriptor, value }.as_expr())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EncodeProtoFn {
+    descriptor: MessageDescriptor,
+    value: Box<dyn Expression>,
+}
+
+impl FunctionExpression for EncodeProtoFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+        encode_proto(&self.descriptor, value)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::bytes().fallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+    use std::{env, fs};
+
+    fn test_data_dir() -> PathBuf {
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("tests/data/protobuf")
+    }
+
+    fn read_pb_file(protobuf_bin_message_path: &str) -> String {
+        fs::read_to_string(test_data_dir().join(protobuf_bin_message_path)).unwrap()
+    }
+
+    test_function![
+        encode_proto => EncodeProto;
+
+        encodes {
+            args: func_args![ value: value!({ name: "Someone", phones: [{number: "123-456"}] }),
+                desc_file: test_data_dir().join("test_protobuf/v1/test_protobuf.desc").to_str().unwrap().to_owned(),
+                message_type: "test_protobuf.v1.Person"],
+            want: Ok(value!(read_pb_file("test_protobuf/v1/input/person_someone.pb"))),
+            tdef: TypeDef::bytes().fallible(),
+        }
+
+        encodes_proto3 {
+            args: func_args![
+                value: value!({ name: "Someone", phones: [{number: "123-456", type: "PHONE_TYPE_MOBILE"}] }),
+                desc_file: test_data_dir().join("test_protobuf3/v1/test_protobuf3.desc").to_str().unwrap().to_owned(),
+                message_type: "test_protobuf3.v1.Person"],
+            want: Ok(value!(read_pb_file("test_protobuf3/v1/input/person_someone.pb"))),
+            tdef: TypeDef::bytes().fallible(),
+        }
+    ];
+}

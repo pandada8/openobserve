@@ -621,6 +621,17 @@ pub fn basic_routes() -> Router {
             get(mcp::oauth_protected_resource_metadata_root),
         );
 
+    router = router.route(
+        "/readyz",
+        get(|| async {
+            if config::drain::is_draining() {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            } else {
+                status::schedulez().await.into_response()
+            }
+        }),
+    );
+
     // Auth routes (no authentication required)
     let auth_routes = Router::new()
         .route("/login", post(users::authentication).get(users::get_auth))
@@ -642,6 +653,10 @@ pub fn basic_routes() -> Router {
     {
         node_routes = node_routes.route("/drain_status", get(status::drain_status));
     }
+
+    node_routes = node_routes
+        .route("/drain", put(status::start_oss_drain))
+        .route("/drain/status", get(status::oss_drain_status));
 
     node_routes = node_routes
         .route("/consistent_hash", post(status::consistent_hash))

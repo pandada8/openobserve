@@ -630,6 +630,7 @@ zip = "8.0"
 zstd = "0.13"
 
 [patch.crates-io]
+vrl = { path = "vendor/vrl" }
 datafusion = { git = "https://github.com/openobserve/datafusion", rev = "869ec1a70482e1a26c4ac2fde3e9fd5545c33d7b" }
 datafusion-catalog = { git = "https://github.com/openobserve/datafusion", rev = "869ec1a70482e1a26c4ac2fde3e9fd5545c33d7b" }
 datafusion-catalog-listing = { git = "https://github.com/openobserve/datafusion", rev = "869ec1a70482e1a26c4ac2fde3e9fd5545c33d7b" }

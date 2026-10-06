@@ -1,0 +1,185 @@
+use crate::compiler::prelude::*;
+use crate::stdlib::string_utils::convert_to_string;
+use std::sync::LazyLock;
+
+static DEFAULT_CASE_SENSITIVE: LazyLock<Value> = LazyLock::new(|| Value::Boolean(true));
+
+static PARAMETERS: LazyLock<Vec<Parameter>> = LazyLock::new(|| {
+    vec![
+        Parameter::required("value", kind::BYTES, "The string to search."),
+        Parameter::required(
+            "substring",
+            kind::BYTES,
+            "The substring with which `value` must end.",
+        ),
+        Parameter::optional(
+            "case_sensitive",
+            kind::BOOLEAN,
+            "Whether the match should be case sensitive.",
+        )
+        .default(&DEFAULT_CASE_SENSITIVE),
+    ]
+});
+
+fn ends_with(value: &Value, substring: &Value, case_sensitive: Value) -> Resolved {
+    let case_sensitive = case_sensitive.try_boolean()?;
+    let value = convert_to_string(value, !case_sensitive)?;
+    let substring = convert_to_string(substring, !case_sensitive)?;
+    Ok(value.ends_with(substring.as_ref()).into())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EndsWith;
+
+impl Function for EndsWith {
+    fn identifier(&self) -> &'static str {
+        "ends_with"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Determines whether the `value` string ends with the specified `substring`."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::String.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BOOLEAN
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        PARAMETERS.as_slice()
+    }
+
+    fn compile(
+        &self,
+        _state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let substring = arguments.required("substring");
+        let case_sensitive = arguments.optional("case_sensitive");
+
+        Ok(EndsWithFn {
+            value,
+            substring,
+            case_sensitive,
+        }
+        .as_expr())
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "String ends with (case sensitive)",
+                source: r#"ends_with("The Needle In The Haystack", "The Haystack")"#,
+                result: Ok("true"),
+            },
+            example! {
+                title: "String ends with (case insensitive)",
+                source: r#"ends_with("The Needle In The Haystack", "the haystack", case_sensitive: false)"#,
+                result: Ok("true"),
+            },
+            example! {
+                title: "String ends with (case sensitive failure)",
+                source: r#"ends_with("foobar", "R")"#,
+                result: Ok("false"),
+            },
+        ]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EndsWithFn {
+    value: Box<dyn Expression>,
+    substring: Box<dyn Expression>,
+    case_sensitive: Option<Box<dyn Expression>>,
+}
+
+impl FunctionExpression for EndsWithFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let case_sensitive = self
+            .case_sensitive
+            .map_resolve_with_default(ctx, || DEFAULT_CASE_SENSITIVE.clone())?;
+        let substring = self.substring.resolve(ctx)?;
+        let value = self.value.resolve(ctx)?;
+
+        ends_with(&value, &substring, case_sensitive)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::boolean().infallible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::value;
+
+    use super::*;
+
+    test_function![
+        ends_with => EndsWith;
+
+        no {
+            args: func_args![value: "bar",
+                             substring: "foo"],
+            want: Ok(value!(false)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        opposite {
+            args: func_args![value: "bar",
+                             substring: "foobar"],
+            want: Ok(value!(false)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        subset {
+            args: func_args![value: "foobar",
+                             substring: "oba"],
+            want: Ok(value!(false)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        yes {
+            args: func_args![value: "foobar",
+                             substring: "bar"],
+            want: Ok(value!(true)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        starts_with {
+            args: func_args![value: "foobar",
+                             substring: "foo"],
+            want: Ok(value!(false)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        uppercase {
+            args: func_args![value: "fooBAR",
+                             substring: "BAR"
+            ],
+            want: Ok(value!(true)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        case_sensitive {
+            args: func_args![value: "foobar",
+                             substring: "BAR"
+            ],
+            want: Ok(value!(false)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+
+        case_insensitive {
+            args: func_args![value: "foobar",
+                             substring: "BAR",
+                             case_sensitive: false],
+            want: Ok(value!(true)),
+            tdef: TypeDef::boolean().infallible(),
+        }
+    ];
+}

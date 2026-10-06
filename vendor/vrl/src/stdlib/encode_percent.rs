@@ -1,0 +1,275 @@
+use crate::compiler::function::EnumVariant;
+use crate::compiler::prelude::*;
+use crate::value;
+use percent_encoding::{AsciiSet, utf8_percent_encode};
+use std::sync::LazyLock;
+
+static DEFAULT_ASCII_SET: LazyLock<Value> =
+    LazyLock::new(|| Value::Bytes(Bytes::from("NON_ALPHANUMERIC")));
+
+static ASCII_SET_ENUM: &[EnumVariant] = &[
+    EnumVariant {
+        value: "NON_ALPHANUMERIC",
+        description: "Encode any non-alphanumeric characters. This is the safest option.",
+    },
+    EnumVariant {
+        value: "CONTROLS",
+        description: "Encode only [control characters](https://infra.spec.whatwg.org/#c0-control).",
+    },
+    EnumVariant {
+        value: "FRAGMENT",
+        description: "Encode only [fragment characters](https://url.spec.whatwg.org/#fragment-percent-encode-set)",
+    },
+    EnumVariant {
+        value: "QUERY",
+        description: "Encode only [query characters](https://url.spec.whatwg.org/#query-percent-encode-set)",
+    },
+    EnumVariant {
+        value: "SPECIAL",
+        description: "Encode only [special characters](https://url.spec.whatwg.org/#special-percent-encode-set)",
+    },
+    EnumVariant {
+        value: "PATH",
+        description: "Encode only [path characters](https://url.spec.whatwg.org/#path-percent-encode-set)",
+    },
+    EnumVariant {
+        value: "USERINFO",
+        description: "Encode only [userinfo characters](https://url.spec.whatwg.org/#userinfo-percent-encode-set)",
+    },
+    EnumVariant {
+        value: "COMPONENT",
+        description: "Encode only [component characters](https://url.spec.whatwg.org/#component-percent-encode-set)",
+    },
+    EnumVariant {
+        value: "WWW_FORM_URLENCODED",
+        description: "Encode only [`application/x-www-form-urlencoded`](https://url.spec.whatwg.org/#application-x-www-form-urlencoded-percent-encode-set)",
+    },
+];
+
+static PARAMETERS: LazyLock<Vec<Parameter>> = LazyLock::new(|| {
+    vec![
+        Parameter::required("value", kind::BYTES, "The string to encode."),
+        Parameter::optional(
+            "ascii_set",
+            kind::BYTES,
+            "The ASCII set to use when encoding the data.",
+        )
+        .default(&DEFAULT_ASCII_SET)
+        .enum_variants(ASCII_SET_ENUM),
+    ]
+});
+
+fn encode_percent(value: &Value, ascii_set: &Bytes) -> Resolved {
+    let string = value.try_bytes_utf8_lossy()?;
+    let ascii_set = match ascii_set.as_ref() {
+        b"NON_ALPHANUMERIC" => percent_encoding::NON_ALPHANUMERIC,
+        b"CONTROLS" => percent_encoding::CONTROLS,
+        b"FRAGMENT" => FRAGMENT,
+        b"QUERY" => QUERY,
+        b"SPECIAL" => SPECIAL,
+        b"PATH" => PATH,
+        b"USERINFO" => USERINFO,
+        b"COMPONENT" => COMPONENT,
+        b"WWW_FORM_URLENCODED" => WWW_FORM_URLENCODED,
+        _ => unreachable!("enum invariant"),
+    };
+
+    Ok(utf8_percent_encode(&string, ascii_set).to_string().into())
+}
+
+/// <https://url.spec.whatwg.org/#fragment-percent-encode-set>
+const FRAGMENT: &AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`');
+
+/// <https://url.spec.whatwg.org/#query-percent-encode-set>
+const QUERY: &AsciiSet = &percent_encoding::CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>');
+
+/// <https://url.spec.whatwg.org/#special-percent-encode-set>
+const SPECIAL: &AsciiSet = &QUERY.add(b'\'');
+
+/// <https://url.spec.whatwg.org/#path-percent-encode-set>
+const PATH: &AsciiSet = &QUERY.add(b'?').add(b'`').add(b'{').add(b'}');
+
+/// <https://url.spec.whatwg.org/#userinfo-percent-encode-set>
+const USERINFO: &AsciiSet = &PATH
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'=')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'|');
+
+/// <https://url.spec.whatwg.org/#component-percent-encode-set>
+const COMPONENT: &AsciiSet = &USERINFO.add(b'$').add(b'%').add(b'&').add(b'+').add(b',');
+
+/// <https://url.spec.whatwg.org/#application-x-www-form-urlencoded-percent-encode-set>
+const WWW_FORM_URLENCODED: &AsciiSet =
+    &COMPONENT.add(b'!').add(b'\'').add(b'(').add(b')').add(b'~');
+
+#[derive(Clone, Copy, Debug)]
+pub struct EncodePercent;
+
+fn ascii_sets() -> Vec<Value> {
+    vec![
+        value!("NON_ALPHANUMERIC"),
+        value!("CONTROLS"),
+        value!("FRAGMENT"),
+        value!("QUERY"),
+        value!("SPECIAL"),
+        value!("PATH"),
+        value!("USERINFO"),
+        value!("COMPONENT"),
+        value!("WWW_FORM_URLENCODED"),
+    ]
+}
+
+impl Function for EncodePercent {
+    fn identifier(&self) -> &'static str {
+        "encode_percent"
+    }
+
+    fn usage(&self) -> &'static str {
+        "Encodes a `value` with [percent encoding](https://url.spec.whatwg.org/#percent-encoded-bytes) to safely be used in URLs."
+    }
+
+    fn category(&self) -> &'static str {
+        Category::Codec.as_ref()
+    }
+
+    fn return_kind(&self) -> u16 {
+        kind::BYTES
+    }
+
+    fn parameters(&self) -> &'static [Parameter] {
+        PARAMETERS.as_slice()
+    }
+
+    fn compile(
+        &self,
+        state: &state::TypeState,
+        _ctx: &mut FunctionCompileContext,
+        arguments: ArgumentList,
+    ) -> Compiled {
+        let value = arguments.required("value");
+        let ascii_set = arguments
+            .optional_enum("ascii_set", &ascii_sets(), state)?
+            .unwrap_or_else(|| DEFAULT_ASCII_SET.clone())
+            .try_bytes()
+            .expect("ascii_set not bytes");
+
+        Ok(EncodePercentFn { value, ascii_set }.as_expr())
+    }
+
+    fn examples(&self) -> &'static [Example] {
+        &[
+            example! {
+                title: "Percent encode all non-alphanumeric characters (default)",
+                source: r#"encode_percent("foo bar?")"#,
+                result: Ok("foo%20bar%3F"),
+            },
+            example! {
+                title: "Percent encode only control characters",
+                source: r#"encode_percent("foo \tbar", ascii_set: "CONTROLS")"#,
+                result: Ok("foo %09bar"),
+            },
+            example! {
+                title: "Percent encode special characters",
+                source: r#"encode_percent("foo@bar?")"#,
+                result: Ok("foo%40bar%3F"),
+            },
+        ]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EncodePercentFn {
+    value: Box<dyn Expression>,
+    ascii_set: Bytes,
+}
+
+impl FunctionExpression for EncodePercentFn {
+    fn resolve(&self, ctx: &mut Context) -> Resolved {
+        let value = self.value.resolve(ctx)?;
+        encode_percent(&value, &self.ascii_set)
+    }
+
+    fn type_def(&self, _: &state::TypeState) -> TypeDef {
+        TypeDef::bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    test_function![
+        encode_percent => EncodePercent;
+
+        default {
+            args: func_args![value: "foo bar?"],
+            want: Ok("foo%20bar%3F"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        controls {
+            args: func_args![value: "foo bar", ascii_set: "CONTROLS"],
+            want: Ok("foo %14bar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        fragment {
+            args: func_args![value: r#"foo <>" `bar"#, ascii_set: "FRAGMENT"],
+            want: Ok("foo%20%3C%3E%22%20%60bar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        query {
+            args: func_args![value: r#"foo #"<>bar"#, ascii_set: "QUERY"],
+            want: Ok("foo%20%23%22%3C%3Ebar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        special {
+            args: func_args![value: r#"foo #"<>'bar"#, ascii_set: "SPECIAL"],
+            want: Ok("foo%20%23%22%3C%3E%27bar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        path {
+            args: func_args![value: r#"foo #"<>?`{}bar"#, ascii_set: "PATH"],
+            want: Ok("foo%20%23%22%3C%3E%3F%60%7B%7Dbar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        userinfo {
+            args: func_args![value: r#"foo #"<>?`{}/:;=@[\]^|bar"#, ascii_set: "USERINFO"],
+            want: Ok("foo%20%23%22%3C%3E%3F%60%7B%7D%2F%3A%3B%3D%40%5B%5C%5D%5E%7Cbar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        component {
+            args: func_args![value: r#"foo #"<>?`{}/:;=@[\]^|$%&+,bar"#, ascii_set: "COMPONENT"],
+            want: Ok("foo%20%23%22%3C%3E%3F%60%7B%7D%2F%3A%3B%3D%40%5B%5C%5D%5E%7C%24%25%26%2B%2Cbar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+
+        www_form_urlencoded {
+            args: func_args![value: r#"foo #"<>?`{}/:;=@[\]^|$%&+,!'()~bar"#, ascii_set: "WWW_FORM_URLENCODED"],
+            want: Ok("foo%20%23%22%3C%3E%3F%60%7B%7D%2F%3A%3B%3D%40%5B%5C%5D%5E%7C%24%25%26%2B%2C%21%27%28%29%7Ebar"),
+            tdef: TypeDef::bytes().infallible(),
+        }
+    ];
+}
