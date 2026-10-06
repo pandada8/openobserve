@@ -59,6 +59,16 @@
               <OIcon name="edit" size="sm" />
               <OTooltip :content="t('aiAssistant.editTitleTooltip')" />
             </OButton>
+            <OButton
+              v-if="canShareCurrentChat"
+              variant="ghost"
+              size="icon-sm"
+              data-test="o2-ai-chat-share-btn"
+              @click.stop="showShareDialog = true"
+            >
+              <OIcon name="share" size="sm" />
+              <OTooltip :content="t('aiChatShare.share')" />
+            </OButton>
             <OButton variant="ghost" size="icon-sm" @click="addNewChat">
               <OIcon name="add" size="sm" />
             </OButton>
@@ -135,6 +145,13 @@
           :placeholder="t('aiAssistant.enterChatTitle')"
         />
       </ODialog>
+
+      <AiChatShareDialog
+        v-if="canShareCurrentChat || showShareDialog"
+        v-model:open="showShareDialog"
+        :session-id="currentSessionId"
+        :chat-title="displayedTitle"
+      />
 
       <!-- Delete Chat Confirmation Dialog -->
       <ConfirmDialog
@@ -350,6 +367,8 @@ import O2AIChatHistoryMenu from "@/components/ai-assistant/chat/O2AIChatHistoryM
 import O2AIChatInput from "@/components/ai-assistant/chat/O2AIChatInput.vue";
 import O2AIChatMessage from "@/components/ai-assistant/chat/O2AIChatMessage.vue";
 import O2AIChatToolCallIndicator from "@/components/ai-assistant/chat/O2AIChatToolCallIndicator.vue";
+import AiChatShareDialog from "@/components/ai-assistant/share/AiChatShareDialog.vue";
+import { canShareChat, isChatPersistenceEnabled } from "@/components/ai-assistant/share/chatShare";
 import { useChatHistory } from "@/composables/useChatHistory";
 import { useChatImages } from "@/composables/useChatImages";
 import { useChatHistoryList } from "@/composables/useChatHistoryList";
@@ -375,9 +394,8 @@ import {
   createPreview,
   formatLogEntryContent,
   getLanguageDisplay,
-  parseLogEntries,
   processHtmlBlock,
-  processMessageContent,
+  processChatMessage,
   processTextBlock,
   renderMarkdown,
 } from "@/components/O2AIChat.content";
@@ -394,6 +412,7 @@ const { submitFeedback, chatHistoryServer } = useAiChat();
 export default defineComponent({
   name: "O2AIChat",
   components: {
+    AiChatShareDialog,
     OButton,
     BetaBadge,
     ConfirmDialog,
@@ -1072,30 +1091,17 @@ export default defineComponent({
       store.dispatch("setChatUpdated", false);
     });
 
-    const processedMessages = computed(() => {
-      return chatMessages.value.map((message) => {
-        if (message.role === "user") {
-          const orderedBlocks = parseLogEntries(message.content);
+    const processedMessages = computed(() => chatMessages.value.map(processChatMessage));
 
-          const combinedContentBlocks =
-            orderedBlocks.length > 0
-              ? [...orderedBlocks, ...(message.contentBlocks || [])]
-              : message.contentBlocks || [];
-
-          return {
-            ...message,
-            blocks: orderedBlocks.length > 0 ? [] : processMessageContent(message.content),
-            contentBlocks: combinedContentBlocks,
-          };
-        }
-
-        return {
-          ...message,
-          blocks: processMessageContent(message.content),
-          contentBlocks: message.contentBlocks || [],
-        };
-      });
-    });
+    const showShareDialog = ref(false);
+    const canShareCurrentChat = computed(() =>
+      canShareChat({
+        persistenceEnabled: isChatPersistenceEnabled(store.state.zoConfig),
+        sessionId: currentSessionId.value,
+        hasMessages: chatMessages.value.length > 0,
+        isStreaming: isLoading.value,
+      }),
+    );
 
     const retryGeneration = async (message: any) => {
       if (!message || message.role !== "assistant") return;
@@ -1217,6 +1223,8 @@ export default defineComponent({
       showHistory,
       chatHistory,
       currentChatId,
+      showShareDialog,
+      canShareCurrentChat,
       addNewChat,
       toggleExpand,
       openHistory,
